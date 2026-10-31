@@ -6,6 +6,7 @@ Soporta:
   - Lectura detallada de headers y cuerpo (users.messages.get)
   - Gestión de etiquetas / Labels (users.labels.list / users.messages.modify)
   - Mover a papelera y restaurar (users.messages.trash / users.messages.untrash)
+  - Gestión de borradores / Drafts (users.drafts.list / users.drafts.create / users.drafts.send)
   - Envío de correos con formato texto/HTML y adjuntos multipart (users.messages.send / SMTP)
 """
 import os
@@ -28,6 +29,7 @@ SCOPES = [
     "https://mail.google.com/",
     "https://www.googleapis.com/auth/gmail.modify",
     "https://www.googleapis.com/auth/gmail.send",
+    "https://www.googleapis.com/auth/gmail.compose",
     "https://www.googleapis.com/auth/gmail.labels"
 ]
 
@@ -143,6 +145,29 @@ def modify_labels(msg_id, add_labels=None, remove_labels=None):
     res = svc.users().messages().modify(userId="me", id=msg_id, body=body).execute()
     print(f"✅ Etiquetas actualizadas para {msg_id}: {res.get('labelIds')}")
 
+def list_drafts():
+    """Lista todos los borradores guardados (users.drafts.list)."""
+    svc = get_service()
+    resp = svc.users().drafts().list(userId="me").execute()
+    drafts = resp.get("drafts", [])
+    print(f"\n📝 Borradores guardados ({len(drafts)}):")
+    for d in drafts:
+        m = d.get("message", {})
+        snippet = m.get("snippet", "(Sin contenido)")
+        print(f"  [Draft ID: {d.get('id')}] Mensaje ID: {m.get('id')} ↳ {snippet[:80]}")
+    return drafts
+
+def create_draft(to, subject, body):
+    """Crea un nuevo borrador en Gmail sin enviarlo (users.drafts.create)."""
+    svc = get_service()
+    msg = MIMEText(body, "plain", "utf-8")
+    msg["To"] = to
+    msg["Subject"] = subject
+    raw_message = base64.urlsafe_b64encode(msg.as_bytes()).decode("utf-8")
+    draft = svc.users().drafts().create(userId="me", body={"message": {"raw": raw_message}}).execute()
+    print(f"✅ Borrador creado con éxito (ID: {draft.get('id')}) para {to}.")
+    return draft
+
 def send_email(to, subject, body, attachment=None):
     """Envía un correo mediante SMTP o Gmail API."""
     user = os.environ.get("EMAIL_SMTP_USER") or os.environ.get("GMAIL_USER")
@@ -178,6 +203,10 @@ Búsqueda y Lectura:
   read       <message_id>               Lee el contenido completo de un email
   labels                                Lista todas las etiquetas de la cuenta
 
+Borradores (Drafts):
+  drafts                                Lista todos los borradores guardados (users.drafts.list)
+  draft      <to> "<subject>" "<body>"  Crea un borrador sin enviarlo (users.drafts.create)
+
 Organización y Papelera:
   trash      <message_id>               Mueve un correo a la papelera
   untrash    <message_id>               Recupera un correo de la papelera
@@ -198,6 +227,10 @@ if __name__ == "__main__":
         read_email(sys.argv[2])
     elif cmd == "labels":
         list_labels()
+    elif cmd == "drafts":
+        list_drafts()
+    elif cmd == "draft" and len(sys.argv) >= 5:
+        create_draft(sys.argv[2], sys.argv[3], sys.argv[4])
     elif cmd == "trash" and len(sys.argv) >= 3:
         trash_email(sys.argv[2])
     elif cmd == "untrash" and len(sys.argv) >= 3:
