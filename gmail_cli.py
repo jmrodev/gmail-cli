@@ -1,7 +1,12 @@
 #!/usr/bin/env python3
 """
-Gmail CLI — Herramienta integral para consultar, buscar y enviar correos con Gmail.
-Combina la API oficial de Google (OAuth2) para lectura y SMTP para envío rápido con adjuntos.
+Gmail CLI — Herramienta integral basada en la API Oficial de Gmail v1.
+Soporta:
+  - Búsqueda nativa con operadores Gmail (users.messages.list)
+  - Lectura detallada de headers y cuerpo (users.messages.get)
+  - Gestión de etiquetas / Labels (users.labels.list / users.messages.modify)
+  - Mover a papelera y restaurar (users.messages.trash / users.messages.untrash)
+  - Envío de correos con formato texto/HTML y adjuntos multipart (users.messages.send / SMTP)
 """
 import os
 import sys
@@ -19,7 +24,12 @@ TOKEN_PATH = CONFIG_DIR / "token.json"
 CLIENT_SECRET_PATH = CONFIG_DIR / "client_secret.json"
 ENV_PATH = CONFIG_DIR / "config.env"
 
-SCOPES = ["https://www.googleapis.com/auth/gmail.readonly", "https://www.googleapis.com/auth/gmail.send"]
+SCOPES = [
+    "https://mail.google.com/",
+    "https://www.googleapis.com/auth/gmail.modify",
+    "https://www.googleapis.com/auth/gmail.send",
+    "https://www.googleapis.com/auth/gmail.labels"
+]
 
 def _load_env():
     paths = [Path.cwd() / ".env", ENV_PATH]
@@ -61,6 +71,18 @@ def get_service():
             f.write(creds.to_json())
     return build("gmail", "v1", credentials=creds)
 
+def list_labels():
+    """Lista todas las etiquetas de la cuenta (users.labels.list)."""
+    svc = get_service()
+    resp = svc.users().labels().list(userId="me").execute()
+    labels = resp.get("labels", [])
+    print(f"\n🏷️ Etiquetas de Gmail ({len(labels)}):")
+    print(f"   {'ID':<25} | {'Nombre':<20} | Tipo")
+    print("   " + "-" * 55)
+    for l in labels:
+        print(f"   {l.get('id'):<25} | {l.get('name'):<20} | {l.get('type')}")
+    return labels
+
 def search_emails(query, max_results=15):
     """Busca correos por consulta estilo Gmail."""
     svc = get_service()
@@ -70,8 +92,9 @@ def search_emails(query, max_results=15):
     for m in msgs:
         full = svc.users().messages().get(userId="me", id=m["id"], format="metadata", metadataHeaders=["From", "Subject", "Date"]).execute()
         headers = {h["name"].lower(): h["value"] for h in full.get("payload", {}).get("headers", [])}
+        labels = ",".join(full.get("labelIds", []))
         print(f"  [{m['id']}] {headers.get('date', '')[:16]} | {headers.get('from', '')[:30]}")
-        print(f"      📌 {headers.get('subject', '(Sin asunto)')}")
+        print(f"      📌 {headers.get('subject', '(Sin asunto)')} [Labels: {labels}]")
         print(f"      ↳ {full.get('snippet', '')[:100]}\n")
 
 def read_email(msg_id):
@@ -82,6 +105,7 @@ def read_email(msg_id):
     print(f"\n📨 Asunto : {headers.get('subject')}")
     print(f"👤 De     : {headers.get('from')}")
     print(f"📅 Fecha  : {headers.get('date')}")
+    print(f"🏷️ Labels : {', '.join(full.get('labelIds', []))}")
     print("-" * 60)
     
     def extract_text(payload):
@@ -95,6 +119,29 @@ def read_email(msg_id):
 
     body = extract_text(full.get("payload", {}))
     print(body[:4000])
+
+def trash_email(msg_id):
+    """Mueve un mensaje a la papelera (users.messages.trash)."""
+    svc = get_service()
+    svc.users().messages().trash(userId="me", id=msg_id).execute()
+    print(f"🗑️ Mensaje {msg_id} movido a la papelera.")
+
+def untrash_email(msg_id):
+    """Restaura un mensaje de la papelera (users.messages.untrash)."""
+    svc = get_service()
+    svc.users().messages().untrash(userId="me", id=msg_id).execute()
+    print(f"♻️ Mensaje {msg_id} restaurado de la papelera.")
+
+def modify_labels(msg_id, add_labels=None, remove_labels=None):
+    """Agrega o quita etiquetas de un mensaje (users.messages.modify)."""
+    svc = get_service()
+    body = {}
+    if add_labels:
+        body["addLabelIds"] = [l.strip() for l in add_labels.split(",")]
+    if remove_labels:
+        body["removeLabelIds"] = [l.strip() for l in remove_labels.split(",")]
+    res = svc.users().messages().modify(userId="me", id=msg_id, body=body).execute()
+    print(f"✅ Etiquetas actualizadas para {msg_id}: {res.get('labelIds')}")
 
 def send_email(to, subject, body, attachment=None):
     """Envía un correo mediante SMTP o Gmail API."""
@@ -126,9 +173,17 @@ def send_email(to, subject, body, attachment=None):
 USAGE = """
 Uso: gmail-cli <comando> [args...]
 
-Comandos:
+Búsqueda y Lectura:
   search     "<query>" [max]            Busca correos (ej. "from:profe is:unread")
   read       <message_id>               Lee el contenido completo de un email
+  labels                                Lista todas las etiquetas de la cuenta
+
+Organización y Papelera:
+  trash      <message_id>               Mueve un correo a la papelera
+  untrash    <message_id>               Recupera un correo de la papelera
+  tag        <id> <+LABEL,-LABEL>       Modifica etiquetas (ej: tag 18f... +STARRED,-UNREAD)
+
+Envío:
   send       <to> "<subject>" "<body>" [adjunto] Envía un email con o sin archivo adjunto
 """
 
@@ -141,6 +196,17 @@ if __name__ == "__main__":
         search_emails(sys.argv[2], int(sys.argv[3]) if len(sys.argv) > 3 else 15)
     elif cmd == "read" and len(sys.argv) >= 3:
         read_email(sys.argv[2])
+    elif cmd == "labels":
+        list_labels()
+    elif cmd == "trash" and len(sys.argv) >= 3:
+        trash_email(sys.argv[2])
+    elif cmd == "untrash" and len(sys.argv) >= 3:
+        untrash_email(sys.argv[2])
+    elif cmd == "tag" and len(sys.argv) >= 4:
+        tags = sys.argv[3]
+        add = ",".join([t[1:] for t in tags.split(",") if t.startswith("+")])
+        rem = ",".join([t[1:] for t in tags.split(",") if t.startswith("-")])
+        modify_labels(sys.argv[2], add_labels=add, remove_labels=rem)
     elif cmd == "send" and len(sys.argv) >= 5:
         att = sys.argv[5] if len(sys.argv) > 5 else None
         send_email(sys.argv[2], sys.argv[3], sys.argv[4], att)
